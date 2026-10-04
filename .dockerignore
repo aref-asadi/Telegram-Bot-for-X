@@ -1,0 +1,29 @@
+# ------------------------------------------------------------------------------
+#  Build context exclusions - keeps secrets and runtime data OUT of the image.
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# Never bake the SQLite database (it stores user credentials) into an image.
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# Git, editors, CI
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+*.log

@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Telegram-Bot-for-X  |  Files that must never be committed
+# ---------------------------------------------------------------------------
+
+# Local secrets / configuration (contains the bot token)
+.env
+
+# Runtime data: the SQLite database holds user credentials -> never commit it
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python bytecode / build artefacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Editors & OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

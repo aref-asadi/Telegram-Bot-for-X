@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Telegram-Bot-for-X  |  Runtime dependencies
+# ---------------------------------------------------------------------------
+# Telegram Bot framework (v21+ required for the async ConversationHandler API).
+python-telegram-bot>=21.6
+
+# Async HTTP client with HTTP/2 support (mimics a real browser talking to X).
+httpx[http2]>=0.27.0
+
+# Async SQLite driver - stores per-user credentials & translation cache.
+aiosqlite>=0.20.0
+
+# Lightweight async web server for the Render/Koyeb health-check endpoint.
+aiohttp>=3.9.5
+
+# Official xAI Grok client (OpenAI-compatible) used for per-user translations.
+openai>=1.40.0
+
+# Loads environment variables from a local .env file in development.
+python-dotenv>=1.0.1
