@@ -19,6 +19,7 @@ Management commands handled outside the conversation:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import warnings
@@ -43,7 +44,7 @@ from telegram.ext import (
 )
 
 from .config import get_settings
-from .database import Database
+from .database import Database, FeedSettings
 from .twitter_client import (
     TwitterAuthError,
     TwitterError,
@@ -107,6 +108,9 @@ BOOKMARKLET_GUIDE = (
     "باشید.\n"
     "۴) روی بوکمارکلت در نوار بوکمارک‌ها کلیک کنید.\n"
     "۵) چند لحظه بعد خودکار به همین چت برمی‌گردید و اتصال کامل می‌شود. ✅\n\n"
+    "📱 <b>روش جایگزین موبایل:</b> روی دکمهٔ «ورود آسان با مرورگر موبایل» بزنید، "
+    "در x.com وارد حساب خود شوید و به تلگرام برگردید — کوکی‌ها خودکار ثبت "
+    "می‌شوند. ✅\n\n"
     "🔄 <b>روش جایگزین:</b> اگر بوکمارکلت کار نکرد، هر دو کوکی را از DevTools "
     "(<b>F12</b> → Application → Cookies → x.com) کپی کرده و <b>در یک پیام</b> "
     "بفرستید:\n"
@@ -294,7 +298,13 @@ def _bookmarklet_guide(
                     "🧩 صفحهٔ نصب بوکمارکلت",
                     url=f"{base}/bookmarklet?c={chat_id}",
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    "📱 ورود آسان با مرورگر موبایل",
+                    url=f"{base}/webview?c={chat_id}",
+                )
+            ],
         ]
     )
     return BOOKMARKLET_GUIDE, keyboard
@@ -685,6 +695,7 @@ HELP_TEXT = (
     "/pause — توقف ارسال توییت‌ها\n"
     "/resume — ادامهٔ ارسال توییت‌ها\n"
     "/set_grok — ثبت یا تغییر کلید گروک\n"
+    "/feeds — نمایش و تنظیم فیدهای دوگانه\n"
     "/logout — حذف کامل اطلاعات\n"
     "/cancel — لغو عملیات جاری"
 )
@@ -763,6 +774,113 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ---------------------------------------------------------------------------
+# Dual-feed settings (/feeds + inline toggle)
+# ---------------------------------------------------------------------------
+FEEDS_TOGGLE_CALLBACK = "feeds_toggle"
+
+
+def _feeds_text(
+    enabled: bool, min_likes: int, min_retweets: int, min_impressions: int
+) -> str:
+    """Render the /feeds status message (shared by show and toggle paths)."""
+    state = "✅ فعال" if enabled else "❌ غیرفعال"
+    return (
+        "📰 <b>تنظیمات فیدها</b>\n\n"
+        "• فید <b>Following</b> (زمانی): همهٔ توییت‌های جدید — همیشه فعال ✅\n"
+        f"• فید <b>For you</b> (هوشمند، فیلترشده): {state}\n\n"
+        "<b>کفِ کیفیت فید For you:</b>\n"
+        f"• حداقل لایک: <code>{min_likes}</code>\n"
+        f"• حداقل ریتوییت: <code>{min_retweets}</code>\n"
+        f"• حداقل بازدید: <code>{min_impressions}</code>\n\n"
+        "ℹ️ سقف‌ها را مدیر سرور با متغیرهای FOR_YOU_MIN_* تعیین می‌کند؛ توییت‌های "
+        "زیر این سقف‌ها فقط از طریق فید Following ارسال می‌شوند."
+    )
+
+
+def _feeds_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    label = (
+        "❌ غیرفعال‌کردن فید For you"
+        if enabled
+        else "✅ فعال‌کردن فید For you"
+    )
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(label, callback_data=FEEDS_TOGGLE_CALLBACK)]]
+    )
+
+
+async def feeds_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the dual-feed state with an inline For-you toggle (``/feeds``)."""
+    chat_id = update.effective_chat.id
+    db = _get_db(context)
+    if await db.get_user(chat_id) is None:
+        await _send(context, chat_id, _NOT_REGISTERED)
+        return
+
+    settings = get_settings()
+    feed = await db.get_feed_settings(chat_id)
+    if feed is None:
+        enabled = True
+        min_likes = settings.for_you_min_likes
+        min_retweets = settings.for_you_min_retweets
+        min_impressions = settings.for_you_min_impressions
+    else:
+        enabled = feed.for_you_enabled
+        min_likes = feed.for_you_min_likes
+        min_retweets = feed.for_you_min_retweets
+        min_impressions = feed.for_you_min_impressions
+
+    await _send(
+        context,
+        chat_id,
+        _feeds_text(enabled, min_likes, min_retweets, min_impressions),
+        reply_markup=_feeds_keyboard(enabled),
+    )
+
+
+async def feeds_toggle_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Flip the per-user For-you feed switch from the /feeds button."""
+    query = update.callback_query
+    if query is None:
+        return
+    chat_id = query.message.chat_id if query.message else query.from_user.id
+    db = _get_db(context)
+    if await db.get_user(chat_id) is None:
+        await query.answer("ℹ️ ابتدا با دستور /start پروفایل بسازید.", show_alert=True)
+        return
+
+    settings = get_settings()
+    feed = await db.get_feed_settings(chat_id)
+    if feed is None:
+        # First toggle: snapshot the server defaults so later env changes do
+        # not silently alter an explicitly configured user.
+        feed = FeedSettings(
+            chat_id=chat_id,
+            for_you_enabled=True,
+            for_you_min_likes=settings.for_you_min_likes,
+            for_you_min_retweets=settings.for_you_min_retweets,
+            for_you_min_impressions=settings.for_you_min_impressions,
+        )
+    feed.for_you_enabled = not feed.for_you_enabled
+    await db.upsert_feed_settings(feed)
+    await query.answer("✅ تنظیمات فید به‌روزرسانی شد.")
+
+    if query.message is not None:
+        with contextlib.suppress(TelegramError):
+            await query.edit_message_text(
+                _feeds_text(
+                    feed.for_you_enabled,
+                    feed.for_you_min_likes,
+                    feed.for_you_min_retweets,
+                    feed.for_you_min_impressions,
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_feeds_keyboard(feed.for_you_enabled),
+            )
+
+
+# ---------------------------------------------------------------------------
 # Handler factories (wired up in main.py)
 # ---------------------------------------------------------------------------
 def get_conversation_handler() -> ConversationHandler:
@@ -806,13 +924,21 @@ def get_conversation_handler() -> ConversationHandler:
         )
 
 
-def get_management_handlers() -> list[CommandHandler]:
-    """Build the standalone command handlers (registered in a lower group)."""
+def get_management_handlers() -> list:
+    """Build the standalone command handlers (registered in a lower group).
+
+    Also carries the ``/feeds`` toggle's ``CallbackQueryHandler`` - callbacks
+    that live outside the onboarding conversation.
+    """
     return [
         CommandHandler("help", help_command, filters=PRIVATE),
         CommandHandler("status", status_command, filters=PRIVATE),
         CommandHandler("pause", pause_command, filters=PRIVATE),
         CommandHandler("resume", resume_command, filters=PRIVATE),
+        CommandHandler("feeds", feeds_command, filters=PRIVATE),
         CommandHandler("logout", logout_command, filters=PRIVATE),
+        CallbackQueryHandler(
+            feeds_toggle_callback, pattern=f"^{FEEDS_TOGGLE_CALLBACK}$"
+        ),
     ]
 

@@ -20,8 +20,11 @@ database. There are **no hard-coded user secrets** and **no `.env` credentials**
 | ✅ **Live verification** | Cookies are validated against X *before* the profile is saved — via the GraphQL `HomeTimeline` call, not the deprecated `account/settings.json` endpoint. Invalid cookies send the user back to step 1. |
 | 🖼 **Complete media support** | Text, single photo, 2-10 photo albums, and videos/GIFs (highest-bitrate MP4). |
 | ✂️ **Safe truncation** | Captions are truncated so the *visible* text always stays within Telegram's 1024-character caption limit. |
-| 🌐 **Isolated Grok translation** | Each forwarded tweet carries a `[ 🌐 ترجمه با گروک ]` button. It uses **that user's own** xAI key. Translations are cached in SQLite so nobody is ever billed twice. |
-| ⏸ **User controls** | `/status`, `/pause`, `/resume`, `/set_grok`, `/logout`. |
+| 🌐 **AI translation (OpenAI-compatible)** | Each forwarded tweet carries a `[ 🌐 ترجمه با گروک ]` button. It prefers **that user's own** API key and falls back to the server-wide `AI_API_KEY`. `AI_BASE_URL`/`AI_MODEL` work with xAI Grok (default), OpenAI, OpenRouter or any self-hosted OpenAI-compatible server. Translations are cached in SQLite so nobody is ever billed twice. |
+| 📰 **Dual feeds** | Two independent feeds: chronological **Following** (every tweet) and the algorithmic **For you** feed, quality-filtered by `FOR_YOU_MIN_LIKES` / `FOR_YOU_MIN_RETWEETS` / `FOR_YOU_MIN_IMPRESSIONS` and deduplicated against Following. Each user toggles For-you with `/feeds`. |
+| ➖ **Not-interested feedback** | Every forwarded tweet has a `➖ علاقه‌مند نیستم` button: the message is removed from the chat and the feedback is relayed to X with the user's own session (best-effort, never raises back into Telegram). |
+| 📱 **Mobile webview login** | A phone-only alternative to the bookmarklet: the wizard opens `<PUBLIC_BASE_URL>/webview?c=<id>`, a reverse proxy of x.com that rebinds cookies to the bot's origin, verifies them live and stores the session — no DevTools needed. |
+| ⏸ **User controls** | `/status`, `/pause`, `/resume`, `/set_grok`, `/feeds`, `/logout`. |
 | 🔄 **Auto-recovery** | If X invalidates a session (HTTP 401/403), that user is deactivated and notified to re-onboard. Other users are unaffected. |
 | 🩺 **Free-hosting ready** | A tiny `aiohttp` server serves `GET /health` → `{"status":"ok"}` so Render / Koyeb / Railway keep the container alive. |
 | 🐳 **Dockerised** | Slim Python 3.11 image, non-root user, persistent volume for SQLite. |
@@ -337,7 +340,9 @@ The bot then performs a **live check** against X:
 
 Not interested right now? Tap
 **`⏭️ رد کردن / فعلاً بدون هوش مصنوعی`** (or send `/skip`). You can add a key
-later at any time with **`/set_grok`**.
+later at any time with **`/set_grok`**. If the operator configured a server-wide
+`AI_API_KEY`, the translate button also works without a personal key — your own
+key just keeps billing fully isolated.
 
 Once finished, the bot replies with a success message and begins polling. The
 first successful poll seeds the timeline pointer and sends a short
@@ -351,17 +356,20 @@ forwarded.
 1. **Auth** — The client sends the browser's public web bearer token plus the
    user's `auth_token` and `ct0` cookies, with `ct0` mirrored into the
    `x-csrf-token` header (the double-submit CSRF pattern X's own web app uses).
-2. **Fetch** — The home timeline is read from X's internal GraphQL
-   `HomeTimeline` operation. If that returns nothing (query-id drift / soft
+2. **Fetch (two feeds)** — Each poll reads the chronological **Following** feed
+   (`HomeLatestTimeline`) and — unless disabled via `/feeds` — the algorithmic
+   **For you** home feed. If GraphQL returns nothing (query-id drift / soft
    failure), the legacy v1.1 `statuses/home_timeline.json` endpoint is used as a
    fallback.
 3. **Parse** — The payload is walked recursively for `tweet_results`, unwrapping
    visibility wrappers and retweets, extracting author, body (including
    long-form `note_tweet` text), photos, and the highest-bitrate MP4 variant for
    videos/GIFs.
-4. **Deduplicate** — Tweet IDs are snowflakes: any tweet whose numeric id is
-   greater than the stored `last_tweet_id` is new. New tweets are sent **oldest
-   first** so the chat reads chronologically.
+4. **Deduplicate & filter** — Tweet IDs are snowflakes: any tweet whose numeric
+   id is greater than the stored `last_tweet_id` (`last_for_you_id` for the
+   For-you feed) is new. New tweets are sent **oldest first** so the chat reads
+   chronologically. For-you tweets are additionally deduplicated against the
+   Following pointer and dropped when they miss the `FOR_YOU_MIN_*` thresholds.
 5. **Deliver** — Media is dispatched with the correct Telegram method (album →
    `send_media_group`, photo → `send_photo`, video → `send_video`, text →
    `send_message`), each with a truncated caption and the translate button.

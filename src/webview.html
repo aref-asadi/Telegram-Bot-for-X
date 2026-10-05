@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>اتصال به ایکس</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Tahoma, sans-serif; background:#f5f8fa; color:#0f1419; margin:0; display:flex; justify-content:center; }
+  .card { background:#fff; border-radius:16px; box-shadow:0 2px 12px rgba(0,0,0,.08); margin:24px 16px; padding:24px; max-width:480px; width:100%; }
+  h1 { font-size:20px; margin:0 0 12px; }
+  ol { padding-right:20px; line-height:1.9; margin:8px 0; }
+  .btn { display:block; text-align:center; background:#1d9bf0; color:#fff; text-decoration:none; border-radius:999px; padding:12px 16px; font-weight:700; margin-top:16px; }
+  .note { font-size:13px; color:#536471; margin-top:14px; line-height:1.8; }
+  .ok { color:#00ba7c; font-weight:700; }
+  .err { color:#f4212e; font-weight:700; }
+  #status { margin-top:14px; font-size:14px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔐 اتصال اکانت ایکس</h1>
+  <p>با ورود از این صفحه، کوکی‌های <b>auth_token</b> و <b>ct0</b> به‌صورت خودکار ثبت می‌شوند؛ نیازی به DevTools نیست.</p>
+  <ol>
+    <li>روی دکمهٔ زیر بزنید و وارد اکانت خود شوید.</li>
+    <li>پس از ورود، وضعیت «اتصال کامل» همین‌جا ظاهر می‌شود.</li>
+    <li>به تلگرام برگردید؛ چند لحظه بعد توییت‌ها شروع می‌شوند.</li>
+  </ol>
+  <a class="btn" href="/webview/x/i/flow/login">🚀 ورود به x.com</a>
+  <div id="status"></div>
+  <p class="note">⚠️ اگر ورود از این صفحه کار نکرد، مثل قبل می‌توانید از بوکمارکلت یا روش دستی استفاده کنید. کوکی‌ها فقط روی همین ربات و در دیتابیس محلی ذخیره می‌شوند.</p>
+</div>
+<script>
+(function () {
+  var chat = "__CHAT_ID__";
+  var done = location.pathname.indexOf("/done") !== -1;
+  var box = document.getElementById("status");
+  function render(state, message) {
+    if (state === "ok") {
+      box.innerHTML = '<p class="ok">✅ اتصال کامل شد! حالا به تلگرام برگردید.</p>';
+    } else if (state === "error") {
+      box.innerHTML = '<p class="err">❌ ' + (message || "ورود ناموفق بود؛ دوباره تلاش کنید.") + "</p>";
+    }
+  }
+  if (done) { render("ok"); return; }
+  function poll() {
+    fetch("/webview/status?c=" + encodeURIComponent(chat), { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && (d.status === "ok" || d.status === "error")) { render(d.status, d.message); }
+        else { setTimeout(poll, 2500); }
+      })
+      .catch(function () { setTimeout(poll, 3000); });
+  }
+  poll();
+})();
+</script>
+</body>
+</html>

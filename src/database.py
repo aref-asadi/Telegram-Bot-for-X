@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS users (
     ct0            TEXT NOT NULL,
     xai_api_key    TEXT,
     last_tweet_id  TEXT,
+    last_for_you_id TEXT,
     is_active      BOOLEAN NOT NULL DEFAULT 1,
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -47,6 +49,14 @@ CREATE TABLE IF NOT EXISTS translations_cache (
     chat_id      INTEGER NOT NULL,
     translation  TEXT NOT NULL,
     PRIMARY KEY (tweet_id, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS feed_settings (
+    chat_id                 INTEGER PRIMARY KEY,
+    for_you_enabled         BOOLEAN NOT NULL DEFAULT 0,
+    for_you_min_likes       INTEGER NOT NULL DEFAULT 0,
+    for_you_min_retweets    INTEGER NOT NULL DEFAULT 0,
+    for_you_min_impressions INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -62,6 +72,8 @@ class UserRecord:
     last_tweet_id: Optional[str]
     is_active: bool
     created_at: Optional[str] = None
+    # Newest tweet already delivered from the filtered "For you" feed.
+    last_for_you_id: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: Sequence[Any]) -> "UserRecord":
@@ -75,8 +87,26 @@ class UserRecord:
             last_tweet_id=row["last_tweet_id"],
             is_active=bool(row["is_active"]),
             created_at=row["created_at"] if "created_at" in keys else None,
+            last_for_you_id=(
+                row["last_for_you_id"] if "last_for_you_id" in keys else None
+            ),
         )
 
+
+
+@dataclass
+class FeedSettings:
+    """Per-user dual-feed preferences (row of the ``feed_settings`` table).
+
+    Defaults match the environment defaults, so a user without an explicit row
+    simply follows the server-wide configuration.
+    """
+
+    chat_id: int
+    for_you_enabled: bool = False
+    for_you_min_likes: int = 0
+    for_you_min_retweets: int = 0
+    for_you_min_impressions: int = 0
 
 
 class Database:
@@ -112,6 +142,16 @@ class Database:
             await self.connect()
         assert self._conn is not None
         await self._conn.executescript(_SCHEMA)
+        # Runtime migration: databases created before the dual-feed update do
+        # not have the ``last_for_you_id`` column yet (fresh databases already
+        # got it from CREATE TABLE above, so this then fails with a duplicate
+        # -column error which is harmless).
+        try:
+            await self._conn.execute(
+                "ALTER TABLE users ADD COLUMN last_for_you_id TEXT"
+            )
+        except sqlite3.OperationalError:
+            pass
         await self._conn.commit()
         logger.info("Database schema ready.")
 
@@ -196,6 +236,73 @@ class Database:
                 (tweet_id, chat_id),
             )
             await conn.commit()
+
+    async def update_last_for_you_id(self, chat_id: int, tweet_id: str) -> None:
+        """Persist the newest tweet id delivered from the filtered For-you feed."""
+        conn = self._connection()
+        async with self._lock:
+            await conn.execute(
+                "UPDATE users SET last_for_you_id = ? WHERE chat_id = ?",
+                (tweet_id, chat_id),
+            )
+            await conn.commit()
+
+    async def save_session(self, chat_id: int, auth_token: str, ct0: str) -> None:
+        """Store/refresh a user's X session cookies (mobile-webview flow).
+
+        Thin wrapper over :meth:`upsert_user` so the webview and the text-cookie
+        onboarding share one code path (existing keys/settings are preserved).
+        """
+        await self.upsert_user(chat_id, auth_token, ct0)
+
+    # -- feed settings -----------------------------------------------------
+    async def get_feed_settings(self, chat_id: int) -> Optional[FeedSettings]:
+        """Return the user's feed preferences, or ``None`` when never set.
+
+        ``None`` means "no overrides" - callers fall back to the server-wide
+        environment configuration (``FOR_YOU_*`` settings).
+        """
+        conn = self._connection()
+        async with conn.execute(
+            "SELECT * FROM feed_settings WHERE chat_id = ?", (chat_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return FeedSettings(
+            chat_id=chat_id,
+            for_you_enabled=bool(row["for_you_enabled"]),
+            for_you_min_likes=int(row["for_you_min_likes"]),
+            for_you_min_retweets=int(row["for_you_min_retweets"]),
+            for_you_min_impressions=int(row["for_you_min_impressions"]),
+        )
+
+    async def upsert_feed_settings(self, feed: FeedSettings) -> None:
+        """Insert or update the feed preferences for ``feed.chat_id``."""
+        conn = self._connection()
+        async with self._lock:
+            await conn.execute(
+                """
+                INSERT INTO feed_settings (
+                    chat_id, for_you_enabled, for_you_min_likes,
+                    for_you_min_retweets, for_you_min_impressions
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    for_you_enabled         = excluded.for_you_enabled,
+                    for_you_min_likes       = excluded.for_you_min_likes,
+                    for_you_min_retweets    = excluded.for_you_min_retweets,
+                    for_you_min_impressions = excluded.for_you_min_impressions
+                """,
+                (
+                    feed.chat_id,
+                    1 if feed.for_you_enabled else 0,
+                    feed.for_you_min_likes,
+                    feed.for_you_min_retweets,
+                    feed.for_you_min_impressions,
+                ),
+            )
+            await conn.commit()
+        logger.info("Saved feed settings for chat_id=%s", feed.chat_id)
 
     async def set_grok_key(self, chat_id: int, api_key: Optional[str]) -> None:
         """Store (or clear, when ``api_key`` is ``None``) the user's xAI key."""

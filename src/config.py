@@ -67,7 +67,15 @@ class Settings:
     database_path: Path
     poll_interval_seconds: int
     max_tweets_per_poll: int
-    xai_model: str
+    # OpenAI-compatible translation provider (xAI/Grok by default). A user's
+    # per-user key stored in SQLite takes precedence over the global key.
+    ai_base_url: str
+    ai_model: str
+    ai_api_key: str | None
+    # "For you" filtered-feed quality thresholds (0 = accept everything).
+    for_you_min_likes: int
+    for_you_min_retweets: int
+    for_you_min_impressions: int
     log_level: str
     # Public origin of this deployment (e.g. https://my-bot.onrender.com).
     # Used to build the bookmarklet installer page and its /auth endpoint.
@@ -99,13 +107,22 @@ def load_settings() -> Settings:
         _get_env("PUBLIC_BASE_URL") or _get_env("RENDER_EXTERNAL_URL")
     ).rstrip("/")
 
+    # Translation provider: AI_MODEL is preferred, the legacy XAI_MODEL name
+    # still works so existing deployments keep functioning after an upgrade.
+    ai_model = _get_env("AI_MODEL") or _get_env("XAI_MODEL", "grok-3")
+
     settings = Settings(
         bot_token=bot_token,
         port=_get_int("PORT", 8000),
         database_path=database_path,
         poll_interval_seconds=max(30, _get_int("POLL_INTERVAL_SECONDS", 180)),
         max_tweets_per_poll=max(1, _get_int("MAX_TWEETS_PER_POLL", 20)),
-        xai_model=_get_env("XAI_MODEL", "grok-3"),
+        ai_base_url=_get_env("AI_BASE_URL", "https://api.x.ai/v1").rstrip("/"),
+        ai_model=ai_model,
+        ai_api_key=_get_env("AI_API_KEY") or None,
+        for_you_min_likes=max(0, _get_int("FOR_YOU_MIN_LIKES", 0)),
+        for_you_min_retweets=max(0, _get_int("FOR_YOU_MIN_RETWEETS", 0)),
+        for_you_min_impressions=max(0, _get_int("FOR_YOU_MIN_IMPRESSIONS", 0)),
         log_level=_get_env("LOG_LEVEL", "INFO").upper(),
         public_base_url=public_base_url,
     )

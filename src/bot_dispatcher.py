@@ -20,6 +20,7 @@ Captions are always truncated so the *visible* text stays within Telegram's
 
 from __future__ import annotations
 
+import contextlib
 import html
 import logging
 from collections import OrderedDict
@@ -37,6 +38,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
+from .config import get_settings
 from .database import Database
 from .grok_service import (
     GrokAuthError,
@@ -44,6 +46,7 @@ from .grok_service import (
     GrokRateLimitError,
     translate_tweet,
 )
+from .twitter_client import TwitterError, send_not_interested
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,15 @@ NO_KEY_ALERT = (
     "⚠️ شما کلید گروک تنظیم نکرده‌اید.\n"
     "برای فعال‌سازی ترجمهٔ هوشمند، دستور /set_grok را اجرا کنید."
 )
+
+# ---------------------------------------------------------------------------
+# "Not interested" feedback button (callback data "ni_<tweet_id>").
+# Pressing it removes the forwarded tweet from the chat and relays X's own
+# "Not interested" feedback for that post back to the timeline algorithm.
+# ---------------------------------------------------------------------------
+NOT_INTERESTED_CALLBACK_PREFIX = "ni_"
+NOT_INTERESTED_BUTTON_TEXT = "➖ علاقه‌مند نیستم"
+NOT_INTERESTED_ALERT = "✅ به ایکس اطلاع داده شد؛ این توییت کمتر نمایش داده می‌شود."
 
 # ---------------------------------------------------------------------------
 # Small in-memory registry of tweet bodies, keyed by tweet id.
@@ -102,7 +114,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def build_keyboard(tweet_id: str) -> InlineKeyboardMarkup:
-    """Build the per-tweet inline keyboard (single translate button)."""
+    """Build the per-tweet inline keyboard (translate + not-interested)."""
     return InlineKeyboardMarkup(
         [
             [
@@ -110,7 +122,13 @@ def build_keyboard(tweet_id: str) -> InlineKeyboardMarkup:
                     text=TRANSLATION_BUTTON_TEXT,
                     callback_data=f"{TRANSLATE_CALLBACK_PREFIX}{tweet_id}",
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text=NOT_INTERESTED_BUTTON_TEXT,
+                    callback_data=f"{NOT_INTERESTED_CALLBACK_PREFIX}{tweet_id}",
+                )
+            ],
         ]
     )
 
@@ -403,7 +421,9 @@ async def translate_callback(
             text="⚠️ ابتدا با ارسال /start پروفایل خود را بسازید.", show_alert=True
         )
         return
-    if not user.xai_api_key:
+    # Per-user key first; the server-wide AI_API_KEY (see grok_service) is the
+    # fallback, so the alert only fires when neither is configured.
+    if not user.xai_api_key and not get_settings().ai_api_key:
         await query.answer(text=NO_KEY_ALERT, show_alert=True)
         return
 
@@ -456,4 +476,50 @@ async def translate_callback(
     # 5) Persist then deliver.
     await db.save_translation(tweet_id, chat_id, translation)
     await _send_translation(context, chat_id, query, translation, cached=False)
+
+
+async def not_interested_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle ``ni_<tweet_id>`` presses from the per-tweet feedback button.
+
+    UX contract (mirrors the in-app flow): acknowledge with an alert, remove
+    the forwarded tweet from the chat, then *best-effort* relay the feedback
+    to X with the user's own session. X-side failures are logged only - the
+    user has already been acknowledged, so never raise back into Telegram.
+    """
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+
+    tweet_id = query.data[len(NOT_INTERESTED_CALLBACK_PREFIX):]
+    chat_id = query.message.chat_id if query.message else query.from_user.id
+
+    # Acknowledge first so the spinner stops even if the deletion/X call is slow.
+    await query.answer(text=NOT_INTERESTED_ALERT, show_alert=True)
+
+    # Remove the tweet message - that is the whole point of the button.
+    if query.message is not None:
+        with contextlib.suppress(TelegramError):
+            await query.message.delete()
+
+    # Best-effort: report "Not interested" to X with the user's cookies.
+    db = _get_db(context)
+    user = await db.get_user(chat_id)
+    if user is None or not user.auth_token or not user.ct0:
+        logger.info(
+            "NotInterested for tweet %s skipped: no session for chat_id=%s.",
+            tweet_id,
+            chat_id,
+        )
+        return
+    try:
+        await send_not_interested(user.auth_token, user.ct0, tweet_id)
+    except TwitterError as exc:
+        logger.warning(
+            "NotInterested relay failed for tweet %s (chat_id=%s): %s",
+            tweet_id,
+            chat_id,
+            exc,
+        )
 

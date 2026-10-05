@@ -46,6 +46,19 @@ BEARER_TOKEN = (
 # drifts over time; this known-good id is used as the primary attempt and a
 # v1.1 REST endpoint is used as a fallback if GraphQL stops responding.
 HOME_TIMELINE_QUERY_ID = "c-CzHF1LboFilMpsx4ZCrQ"
+
+# GraphQL operation behind the chronological "Following" tab (HomeLatestTimeline).
+# Source: the mirrored X internal-API document (fa0311/TwitterInternalAPIDocument);
+# refresh from there if X rotates query ids and this feed starts returning 4xx.
+HOME_LATEST_TIMELINE_QUERY_ID = "OQPHTgwczzp9RMAPt6BH9A"
+
+# Tweet-feedback mutation (the post ⋯ menu's "Not interested" entries).
+# Verified id from the mirrored X internal-API document
+# (fa0311/TwitterInternalAPIDocument): a POST mutation with a features set,
+# so it needs no feature flags. Variables are sent as query params AND JSON
+# body; rejected calls are logged, never fatal (see send_not_interested).
+FEEDBACK_QUERY_ID = "vfVbgvTPTQ-dF_PQ5lD1WQ"
+
 GRAPHQL_BASE = "https://x.com/i/api/graphql"
 V11_BASE = "https://x.com/i/api/1.1"
 
@@ -271,6 +284,32 @@ def _extract_text(result: dict, legacy: dict) -> str:
     return text
 
 
+def _extract_metrics(result: Optional[dict], legacy: dict) -> dict[str, int]:
+    """Best-effort engagement counters used by the For-you quality filters.
+
+    ``result`` is the GraphQL tweet object (carries ``view_count``); legacy is
+    the v1.1-style ``legacy`` dict (carries the favourite/retweet counters).
+    Values that are missing or malformed become ``0``.
+    """
+
+    def _as_int(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    impressions = 0
+    if isinstance(result, dict):
+        view = result.get("view_count")
+        if isinstance(view, dict):
+            impressions = _as_int(view.get("count"))
+    return {
+        "likes": _as_int(legacy.get("favorite_count")),
+        "retweets": _as_int(legacy.get("retweet_count")),
+        "impressions": impressions,
+    }
+
+
 def _build_tweet(result: Any, _depth: int = 0) -> Optional[dict]:
     """Convert a raw GraphQL tweet result into the clean public dict shape.
 
@@ -324,6 +363,7 @@ def _build_tweet(result: Any, _depth: int = 0) -> Optional[dict]:
             tweet["quoted_text"] = quoted_tweet["text"]
             tweet["quoted_author"] = quoted_tweet["author_username"]
 
+    tweet["metrics"] = _extract_metrics(inner, legacy)
     return tweet
 
 
@@ -373,6 +413,8 @@ def _build_tweet_v11(item: Any, _depth: int = 0) -> Optional[dict]:
             tweet["quoted_text"] = _clean_text(quoted_text, quoted)
             tweet["quoted_author"] = (quoted.get("user") or {}).get("screen_name")
 
+    # v1.1 payloads do not expose impression counts, so they stay at 0 here.
+    tweet["metrics"] = _extract_metrics(None, item)
     return tweet
 
 
@@ -515,6 +557,121 @@ class TwitterClient:
 
 
 
+    async def fetch_following_timeline(
+        self, auth_token: str, ct0: str, count: int = 20
+    ) -> list[dict]:
+        """Return tweets from the chronological "Following" timeline.
+
+        The modern GraphQL ``HomeLatestTimeline`` operation - the one behind
+        X's Following tab - is the only source for this feed; unlike the
+        algorithmic home timeline there is no v1.1 equivalent. Endpoint-shape
+        churn (query-id drift) surfaces as :class:`TwitterClientError`, which
+        the scheduler logs and skips for that cycle.
+        """
+        headers = build_headers(auth_token, ct0)
+        variables = dict(_HOME_TIMELINE_VARIABLES)
+        variables["count"] = count
+        params = {
+            "variables": json.dumps(variables, separators=(",", ":")),
+            "features": json.dumps(
+                {k: v for k, v in FEATURES.items() if v is not False},
+                separators=(",", ":"),
+            ),
+        }
+        url = f"{GRAPHQL_BASE}/{HOME_LATEST_TIMELINE_QUERY_ID}/HomeLatestTimeline"
+        try:
+            response = await self._client.get(url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            raise TwitterClientError(
+                f"Network error talking to X GraphQL: {exc}"
+            ) from exc
+
+        try:
+            _raise_for_status(response)
+        except (TwitterAuthError, TwitterRateLimitError):
+            raise
+        except TwitterError as exc:
+            # Query-id drift shows up as a 4xx here - degrade gracefully so
+            # the scheduler can skip this feed for the cycle.
+            raise TwitterClientError(
+                f"HomeLatestTimeline request failed: {exc}"
+            ) from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise TwitterClientError(
+                "X returned a non-JSON GraphQL response."
+            ) from exc
+        return _parse_graphql_tweets(payload)
+
+    async def send_not_interested(
+        self, auth_token: str, ct0: str, tweet_id: str
+    ) -> None:
+        """Report "Not interested" for ``tweet_id`` to X.
+
+        Fires X's timeline-feedback mutation (``timelinesFeedback``, the POST
+        operation behind the post ⋯ menu's feedback entries) with
+        ``feedback_type: "NotInterested"``. The variables are sent both as
+        query parameters (the shape x.com itself uses for POSTs) and in the
+        JSON body, so the call survives either server-side convention.
+
+        Best-effort by design: X rotates GraphQL query ids periodically, so a
+        rejected mutation is logged as a warning instead of failing the
+        Telegram-side acknowledgement. Only a dead session (401/403) is
+        raised so callers can still notice expired cookies.
+        """
+        headers = build_headers(auth_token, ct0)
+        variables = {
+            "tweet_id": tweet_id,
+            "feedback_type": "NotInterested",
+        }
+        params = {
+            "variables": json.dumps(variables, separators=(",", ":")),
+            "features": json.dumps(
+                {k: v for k, v in FEATURES.items() if v is not False},
+                separators=(",", ":"),
+            ),
+        }
+        url = f"{GRAPHQL_BASE}/{FEEDBACK_QUERY_ID}/timelinesFeedback"
+        try:
+            response = await self._client.post(
+                url,
+                params=params,
+                headers=headers,
+                json={"variables": variables, "queryId": FEEDBACK_QUERY_ID},
+            )
+        except httpx.HTTPError as exc:
+            raise TwitterClientError(
+                f"Network error talking to X GraphQL: {exc}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise TwitterAuthError(
+                "Twitter rejected the session while sending feedback "
+                f"(HTTP {response.status_code})."
+            )
+        if response.status_code >= 400:
+            logger.warning(
+                "Timeline feedback rejected for tweet %s (HTTP %s): %s",
+                tweet_id,
+                response.status_code,
+                response.text[:200],
+            )
+            return
+        # GraphQL reports semantic failures inside a 200 body - surface them.
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("errors"):
+            logger.warning(
+                "timelinesFeedback errors for tweet %s: %s",
+                tweet_id,
+                json.dumps(payload["errors"])[:300],
+            )
+            return
+        logger.info("Sent NotInterested feedback for tweet %s.", tweet_id)
+
     # -- internals ---------------------------------------------------------
     async def _graphql_home_timeline(self, headers: dict, count: int) -> dict:
         """Call the GraphQL HomeTimeline operation and return the raw JSON."""
@@ -589,6 +746,20 @@ async def fetch_home_timeline(
     """Fetch the home timeline for a single user's cookies."""
     client = await get_client()
     return await client.fetch_home_timeline(auth_token, ct0, count=count)
+
+
+async def fetch_following_timeline(
+    auth_token: str, ct0: str, count: int = 20
+) -> list[dict]:
+    """Fetch the chronological "Following" timeline for one user's cookies."""
+    client = await get_client()
+    return await client.fetch_following_timeline(auth_token, ct0, count=count)
+
+
+async def send_not_interested(auth_token: str, ct0: str, tweet_id: str) -> None:
+    """Best-effort "Not interested" feedback for ``tweet_id`` on X."""
+    client = await get_client()
+    return await client.send_not_interested(auth_token, ct0, tweet_id)
 
 
 async def close_client() -> None:

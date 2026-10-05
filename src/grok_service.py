@@ -1,12 +1,13 @@
-"""Per-user Persian translation via the xAI Grok API.
+"""Per-user Persian translation via an OpenAI-compatible chat API.
 
-Each user supplies their *own* API key (collected by the onboarding wizard and
-stored per-user in SQLite). This module never reads a global key - it is always
-handed the key of the user who pressed the translate button, which is what keeps
+Each user may supply their *own* API key (collected by the onboarding wizard
+and stored per-user in SQLite). When the user has no personal key, the global
+``AI_API_KEY`` from the environment is used instead - per-user keys still keep
 billing and the translation cache completely isolated between users.
 
-The xAI endpoint is OpenAI-compatible, so the official ``openai`` SDK is used
-with ``base_url="https://api.x.ai/v1"``.
+The endpoint is fully configurable (``AI_BASE_URL`` / ``AI_MODEL``), so any
+OpenAI-compatible provider works: xAI's Grok (the default), OpenAI, OpenRouter
+or a self-hosted vLLM/Ollama server.
 """
 
 from __future__ import annotations
@@ -20,8 +21,9 @@ from .config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# xAI's OpenAI-compatible base URL.
-XAI_BASE_URL = "https://api.x.ai/v1"
+# Default base URL - xAI's OpenAI-compatible endpoint, used when AI_BASE_URL
+# is not configured.
+DEFAULT_BASE_URL = "https://api.x.ai/v1"
 
 # The system prompt asks for a faithful, natural Persian rendering while
 # leaving machine-readable tokens (links, mentions, hashtags) untouched.
@@ -50,31 +52,37 @@ class GrokRateLimitError(GrokError):
     """Raised when xAI rate-limits the user's key."""
 
 
-def _create_client(user_api_key: str) -> AsyncOpenAI:
-    """Build an ephemeral AsyncOpenAI client for a single user key."""
+def _create_client(api_key: str, base_url: str) -> AsyncOpenAI:
+    """Build an ephemeral AsyncOpenAI client for a single request."""
     return AsyncOpenAI(
-        api_key=user_api_key,
-        base_url=XAI_BASE_URL,
+        api_key=api_key,
+        base_url=(base_url or "").rstrip("/") or DEFAULT_BASE_URL,
         timeout=60.0,
         max_retries=1,
     )
 
 
-async def translate_tweet(text: str, user_api_key: str) -> str:
-    """Translate ``text`` into Persian using the caller's Grok API key.
+async def translate_tweet(text: str, user_api_key: str | None = None) -> str:
+    """Translate ``text`` into Persian.
 
-    Raises :class:`GrokAuthError` for bad keys, :class:`GrokRateLimitError` for
-    429s and :class:`GrokError` for anything else so the caller can show a
-    friendly, specific message to the user.
+    ``user_api_key`` is the key of the user who pressed the translate button;
+    when it is missing/empty the global ``AI_API_KEY`` configured on the server
+    falls back in. Raises :class:`GrokAuthError` for missing/bad keys,
+    :class:`GrokRateLimitError` for 429s and :class:`GrokError` for anything
+    else so the caller can show a friendly, specific message to the user.
     """
-    if not user_api_key or not user_api_key.strip():
-        raise GrokAuthError("No xAI API key was provided.")
-
     settings = get_settings()
-    client = _create_client(user_api_key.strip())
+    api_key = (user_api_key or "").strip() or (settings.ai_api_key or "").strip()
+    if not api_key:
+        raise GrokAuthError(
+            "No API key configured. Set a personal key with /key or ask the "
+            "operator to configure AI_API_KEY."
+        )
+
+    client = _create_client(api_key, settings.ai_base_url)
     try:
         response = await client.chat.completions.create(
-            model=settings.xai_model,
+            model=settings.ai_model,
             temperature=0.3,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -83,24 +91,24 @@ async def translate_tweet(text: str, user_api_key: str) -> str:
         )
     except openai.AuthenticationError as exc:
         raise GrokAuthError(
-            "xAI rejected the API key (authentication failed)."
+            "The API key was rejected (authentication failed)."
         ) from exc
     except openai.PermissionDeniedError as exc:
         raise GrokAuthError(
-            "The xAI API key is not permitted to use this model."
+            "The API key is not permitted to use this model."
         ) from exc
     except openai.RateLimitError as exc:
-        raise GrokRateLimitError("xAI rate limit reached.") from exc
+        raise GrokRateLimitError("AI provider rate limit reached.") from exc
     except openai.APIError as exc:
-        raise GrokError(f"xAI API error: {exc}") from exc
+        raise GrokError(f"AI provider error: {exc}") from exc
     finally:
         # Release the connection pool for this short-lived client.
         await client.close()
 
     if not response.choices:
-        raise GrokError("xAI returned an empty response.")
+        raise GrokError("The AI provider returned an empty response.")
 
     translation = (response.choices[0].message.content or "").strip()
     if not translation:
-        raise GrokError("xAI returned an empty translation.")
+        raise GrokError("The AI provider returned an empty translation.")
     return translation

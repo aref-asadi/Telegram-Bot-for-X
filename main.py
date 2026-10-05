@@ -28,13 +28,18 @@ from telegram import BotCommand, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler
 
-from src.bot_dispatcher import TRANSLATE_CALLBACK_PREFIX, translate_callback
+from src.bot_dispatcher import (
+    NOT_INTERESTED_CALLBACK_PREFIX,
+    TRANSLATE_CALLBACK_PREFIX,
+    not_interested_callback,
+    translate_callback,
+)
 from src.bot_wizard import get_conversation_handler, get_management_handlers
 from src.config import ConfigError, configure_logging, get_settings
 from src.database import Database
 from src.scheduler import run_scheduler
 from src.twitter_client import close_client
-from src.web_server import run_web_server, set_bot_username
+from src.web_server import run_web_server, set_bot_username, set_database
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ _BOT_COMMANDS = [
     BotCommand("pause", "توقف ارسال توییت‌ها"),
     BotCommand("resume", "ادامهٔ ارسال توییت‌ها"),
     BotCommand("set_grok", "ثبت یا تغییر کلید گروک"),
+    BotCommand("feeds", "تنظیم فیدهای دوگانه (Following و For you)"),
     BotCommand("logout", "حذف کامل اطلاعات"),
     BotCommand("help", "راهنمای دستورها"),
     BotCommand("cancel", "لغو عملیات جاری"),
@@ -79,11 +85,17 @@ def build_application(bot_token: str, db: Database) -> Application:
     application.bot_data["db"] = db
 
     # Group 0 - the onboarding conversation takes priority, followed by the
-    # per-tweet translate button (callback data "tr_<tweet_id>").
+    # per-tweet buttons: translate ("tr_<tweet_id>") and not-interested
+    # feedback ("ni_<tweet_id>").
     application.add_handler(get_conversation_handler())
     application.add_handler(
         CallbackQueryHandler(
             translate_callback, pattern=f"^{TRANSLATE_CALLBACK_PREFIX}.+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            not_interested_callback, pattern=f"^{NOT_INTERESTED_CALLBACK_PREFIX}.+$"
         )
     )
 
@@ -159,6 +171,10 @@ async def main() -> None:
     # 1) Database (also creates the data directory and schema).
     db = Database(settings.database_path)
     await db.init()
+
+    # Hand the database to the web server so the mobile webview can persist
+    # captured X sessions (same pattern as set_bot_username below).
+    set_database(db)
 
     # 2) Telegram application + handlers.
     application = build_application(settings.bot_token, db)
