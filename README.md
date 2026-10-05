@@ -15,8 +15,9 @@ database. There are **no hard-coded user secrets** and **no `.env` credentials**
 | | |
 |---|---|
 | 👥 **Multi-user** | Unlimited users on one bot instance. Credentials, tweets and translation caches are fully isolated by `chat_id`. |
-| 🧙 **Interactive onboarding** | A Persian-language `ConversationHandler` wizard walks each user through copying their Twitter cookies and (optionally) their Grok API key. |
-| ✅ **Live verification** | Cookies are validated against X *before* the profile is saved. Invalid cookies send the user back to step 1. |
+| ⚡ **1-click bookmarklet onboarding** | A drag-to-bookmarks bookmarklet reads `auth_token`/`ct0` from `document.cookie` on x.com, verifies them server-side (`POST /auth`) and returns the user to the chat via a short `t.me/…?start=auth_<code>` deep link — cookies never enter chat history. |
+| 🧙 **Interactive onboarding** | A Persian-language `ConversationHandler` wizard guides each user: bookmarklet link first, a single-message manual cookie paste as fallback, then the optional Grok API key. |
+| ✅ **Live verification** | Cookies are validated against X *before* the profile is saved — via the GraphQL `HomeTimeline` call, not the deprecated `account/settings.json` endpoint. Invalid cookies send the user back to step 1. |
 | 🖼 **Complete media support** | Text, single photo, 2-10 photo albums, and videos/GIFs (highest-bitrate MP4). |
 | ✂️ **Safe truncation** | Captions are truncated so the *visible* text always stays within Telegram's 1024-character caption limit. |
 | 🌐 **Isolated Grok translation** | Each forwarded tweet carries a `[ 🌐 ترجمه با گروک ]` button. It uses **that user's own** xAI key. Translations are cached in SQLite so nobody is ever billed twice. |
@@ -93,7 +94,9 @@ twitter-telegram-forwarder/
     ├── bot_wizard.py     # Onboarding ConversationHandler + commands
     ├── bot_dispatcher.py # Tweet formatting + media dispatch + translate button
     ├── scheduler.py      # Background polling loop
-    └── web_server.py     # aiohttp health-check server
+    ├── web_server.py     # aiohttp: /health + POST /auth + GET /bookmarklet
+    ├── bookmarklet.js    # 1-click credential handover bookmarklet (source)
+    └── bookmarklet.html  # installer page template served at /bookmarklet
 ```
 
 ---
@@ -126,6 +129,28 @@ Then open Telegram, find your bot and send **`/start`**.
 
 > 💡 Create a bot and get `BOT_TOKEN` from [@BotFather](https://t.me/BotFather).
 
+### ⚡ 1-click bookmarklet login
+
+With `PUBLIC_BASE_URL` configured, `/start` offers a **bookmarklet installer
+link** instead of the manual cookie guide:
+
+1. The user drags the button from `https://<your-host>/bookmarklet?c=<chat_id>`
+   to their bookmarks bar.
+2. While logged in on **x.com**, they click it → the bookmarklet reads the
+   cookies from `document.cookie` and `POST`s them to `/auth`, where they are
+   verified live against X.
+3. The server stashes the session under a **12-character one-time code**
+   (Telegram deep links only allow 64 characters, so the cookies themselves
+   never travel through Telegram) and the browser redirects to
+   `t.me/<bot>?start=auth_<code>`.
+4. The wizard redeems the code, saves the user to SQLite and kicks an
+   immediate timeline poll — done in one click.
+
+**No `PUBLIC_BASE_URL`?** The wizard falls back to a manual guide where both
+cookies are pasted in a **single message**. The bookmarklet also copies that
+paste-ready payload to the clipboard whenever the server is unreachable, so
+the manual path always works.
+
 ---
 
 ## 🔧 Environment Variables
@@ -137,6 +162,7 @@ Only **operator / infrastructure** settings live in `.env`. User credentials are
 |---|---|---|---|
 | `BOT_TOKEN` | – | ✅ | Telegram bot token from **@BotFather**. |
 | `PORT` | `8000` | – | Port for the health-check web server. Render injects `10000`. |
+| `PUBLIC_BASE_URL` | – | – | Public `https://` origin (e.g. `https://my-bot.onrender.com`) used to build the bookmarklet page and its `POST /auth` endpoint. Render's `RENDER_EXTERNAL_URL` is picked up automatically; with no base URL the wizard falls back to manual cookie paste. |
 | `DATABASE_PATH` | `data/bot.db` | – | SQLite file path. The parent folder is created automatically. |
 | `POLL_INTERVAL_SECONDS` | `180` | – | How often each active user's timeline is polled (minimum 30). |
 | `MAX_TWEETS_PER_POLL` | `20` | – | Timeline window size fetched per poll, per user. |
@@ -149,7 +175,7 @@ Only **operator / infrastructure** settings live in `.env`. User credentials are
 
 | Command | What it does |
 |---|---|
-| `/start` | Greets the user and starts (or restarts) the credential wizard. |
+| `/start` | Greets the user and starts the wizard; `/start auth_<code>` completes the bookmarklet handover. |
 | `/status` | Shows whether forwarding is active and whether Grok is linked. |
 | `/pause` | Stops forwarding tweets to this chat. |
 | `/resume` | Resumes forwarding. |

@@ -34,7 +34,7 @@ from src.config import ConfigError, configure_logging, get_settings
 from src.database import Database
 from src.scheduler import run_scheduler
 from src.twitter_client import close_client
-from src.web_server import run_web_server
+from src.web_server import run_web_server, set_bot_username
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ async def post_init(application: Application) -> None:
         await application.bot.set_my_commands(_BOT_COMMANDS)
         me = await application.bot.get_me()
         logger.info("Bot started as @%s (id=%s)", me.username, me.id)
+        # Let the web server bake the @username into the bookmarklet deep link
+        # (t.me/<username>?start=auth_<code>).
+        if me.username:
+            set_bot_username(me.username)
     except TelegramError as exc:
         logger.warning("Could not register bot commands: %s", exc)
 

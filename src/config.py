@@ -69,6 +69,9 @@ class Settings:
     max_tweets_per_poll: int
     xai_model: str
     log_level: str
+    # Public origin of this deployment (e.g. https://my-bot.onrender.com).
+    # Used to build the bookmarklet installer page and its /auth endpoint.
+    public_base_url: str
 
     # Derived / constant values ------------------------------------------------
     @property
@@ -89,6 +92,13 @@ def load_settings() -> Settings:
     if not database_path.is_absolute():
         database_path = (BASE_DIR / database_path).resolve()
 
+    # Public origin used by the bookmarklet onboarding flow. Render injects
+    # RENDER_EXTERNAL_URL automatically; PUBLIC_BASE_URL takes precedence so
+    # self-hosted / Koyeb / Railway deployments can set it explicitly.
+    public_base_url = (
+        _get_env("PUBLIC_BASE_URL") or _get_env("RENDER_EXTERNAL_URL")
+    ).rstrip("/")
+
     settings = Settings(
         bot_token=bot_token,
         port=_get_int("PORT", 8000),
@@ -97,6 +107,7 @@ def load_settings() -> Settings:
         max_tweets_per_poll=max(1, _get_int("MAX_TWEETS_PER_POLL", 20)),
         xai_model=_get_env("XAI_MODEL", "grok-3"),
         log_level=_get_env("LOG_LEVEL", "INFO").upper(),
+        public_base_url=public_base_url,
     )
     return settings
 

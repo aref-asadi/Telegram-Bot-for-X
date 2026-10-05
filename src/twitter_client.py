@@ -431,22 +431,63 @@ class TwitterClient:
     async def verify_credentials(self, auth_token: str, ct0: str) -> bool:
         """Return ``True`` when the cookies map to a live X session.
 
-        Only authentication failures (401/403) are reported as ``False``; any
-        other problem propagates as a :class:`TwitterClientError` so the caller
-        can tell "bad cookies" apart from "X is unreachable".
+        The legacy v1.1 ``account/settings.json`` endpoint that used to serve
+        this check has been deprecated/blocked by X and made *valid* sessions
+        fail during onboarding, so verification now mirrors the real polling
+        path instead:
+
+        1. **Primary** - GraphQL ``HomeTimeline`` with ``count=1``. A 200 with
+           a ``data`` payload proves the session is authenticated; an empty
+           timeline is still a perfectly valid session.
+        2. **Fallback** - v1.1 ``account/verify_credentials.json``, the
+           dedicated session-check endpoint (not ``account/settings.json``).
+
+        Only authentication failures (401/403) are reported as ``False``.
+        Endpoint-shape churn (404/405/429/5xx) is treated as "could not
+        verify" and accepts the cookies rather than blocking initial setup -
+        the scheduler surfaces any genuine session death later. Real
+        transport failures still raise :class:`TwitterClientError` so callers
+        can distinguish "bad cookies" from "X is unreachable".
         """
-        url = f"{V11_BASE}/account/settings.json"
+        headers = build_headers(auth_token, ct0)
+
+        # 1) Modern GraphQL check - the same call the timeline poller makes.
         try:
-            response = await self._client.get(url, headers=build_headers(auth_token, ct0))
+            payload = await self._graphql_home_timeline(headers, 1)
+        except TwitterAuthError:
+            return False
+        except TwitterRateLimitError:
+            # Reaching the rate limiter still means the session authenticated.
+            return True
+        except TwitterClientError as exc:
+            logger.info("GraphQL verification failed (%s) - trying fallback.", exc)
+        else:
+            if isinstance(payload, dict) and "data" in payload:
+                return True
+            logger.info("GraphQL verification returned no data - trying fallback.")
+
+        # 2) Fallback: canonical v1.1 session check (NOT account/settings.json).
+        url = f"{V11_BASE}/account/verify_credentials.json"
+        try:
+            response = await self._client.get(url, headers=headers)
         except httpx.HTTPError as exc:
             raise TwitterClientError(f"Network error while contacting X: {exc}") from exc
 
         if response.status_code == 200:
+            # With follow_redirects an unauthenticated cookie jar can end up
+            # 200 on the login page - that is a rejected session, not a valid one.
+            if "/login" in str(response.url):
+                return False
             return True
         if response.status_code in (401, 403):
             return False
-        _raise_for_status(response)
-        return False  # pragma: no cover - _raise_for_status always raises here
+
+        logger.warning(
+            "Verification endpoint returned HTTP %s - accepting the cookies; "
+            "the scheduler will surface any genuine session problem.",
+            response.status_code,
+        )
+        return True
 
     async def fetch_home_timeline(
         self, auth_token: str, ct0: str, count: int = 20
